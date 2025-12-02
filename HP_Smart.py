@@ -1,12 +1,13 @@
+from asyncio import timeout
 import time
 import re
 import random
 import string
 from typing import Optional, Tuple
- 
+from pywinauto.keyboard import send_keys
 import pyperclip
 import pytest
-from pywinauto import Desktop, keyboard
+from pywinauto import Desktop, keyboard,Application
 from selenium import webdriver
 from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.common.by import By
@@ -27,7 +28,9 @@ OPEN_HP_SMART_BTN = dict(title="Open HP Smart", control_type="Button")
  
 MANAGE_ACCOUNT_BTN = dict(title="Manage HP Account", auto_id="HpcSignedOutIcon", control_type="Button")
 CREATE_ACCOUNT_BTN = dict(auto_id="HpcSignOutFlyout_CreateBtn", control_type="Button")
-FIRSTNAME_FIELD = dict(auto_id="firstName", control_type="Edit")
+# FIRSTNAME_FIELD = dict(auto_id="firstName", control_type="Edit")
+FIRSTNAME_FIELD = {"auto_id":"firstName", "control_type":"Edit"}
+OPEN_HP_SMART_BUTTON = {"title": "Open HP Smart", "control_type": "Button"}
 LASTNAME_FIELD = dict(auto_id="lastName", control_type="Edit")
 EMAIL_FIELD = dict(auto_id="email", control_type="Edit")
 PASSWORD_FIELD = dict(auto_id="password", control_type="Edit")
@@ -71,30 +74,84 @@ def generate_random_name(first_len: int = FIRSTNAME_LEN, last_len: int = LASTNAM
     last = ''.join(random.choices(string.ascii_letters, k=last_len)).capitalize()
     return first, last
  
+
 def launch_hp_smart(timeout: int = DEFAULT_TIMEOUT):
-    """Launch HP Smart using the configured command and return the Desktop object on success."""
+    """Launch HP Smart and return the connected pywinauto Application object."""
+
     try:
+        # ---------------------------------------------------
+        # 1. Launch HP Smart
+        # ---------------------------------------------------
         keyboard.send_keys(APP_LAUNCH_COMMAND)
         log_step("Sent keys to launch HP Smart app.")
- 
+        time.sleep(2)
+
         desktop = Desktop(backend="uia")
-        main_win = desktop.window(title_re=HP_SMART_WINDOW_RE)
-        main_win.wait('exists visible enabled ready', timeout=timeout)
+
+        # ---------------------------------------------------
+        # 2. Get all HP Smart windows (UIAWrapper objects)
+        # ---------------------------------------------------
+        raw_windows = desktop.windows(
+            title_re="HP Smart",
+            control_type="Window",
+            top_level_only=True
+        )
+
+        if not raw_windows:
+            raise Exception("No HP Smart windows detected at all.")
+
+        # ---------------------------------------------------
+        # 3. Convert UIAWrapper --> WindowSpecification
+        # ---------------------------------------------------
+        windows = []
+        for w in raw_windows:
+            try:
+                spec = desktop.window(handle=w.handle)
+                # Keep only visible windows
+                if spec.is_visible():
+                    windows.append(spec)
+            except:
+                pass
+
+        if not windows:
+            raise Exception("HP Smart windows found, but none are visible.")
+
+        # ---------------------------------------------------
+        # 4. Select the LARGEST visible window (main window)
+        # ---------------------------------------------------
+        def win_area(win):
+            r = win.rectangle()
+            return r.width() * r.height()
+
+        main_win = max(windows, key=win_area)
+
+        # Now .wait() is SAFE because it's a WindowSpecification
+        main_win.wait("enabled visible ready", timeout=timeout)
         main_win.set_focus()
+        main_win.maximize()
+
         log_step("Focused HP Smart main window.")
- 
+
+        # ---------------------------------------------------
+        # 5. Connect the Application safely using the handle
+        # ---------------------------------------------------
+        app = Application(backend="uia").connect(handle=main_win.handle)
+
+        # ---------------------------------------------------
+        # 6. Click buttons
+        # ---------------------------------------------------
         manage_btn = main_win.child_window(**MANAGE_ACCOUNT_BTN)
-        manage_btn.wait('visible enabled ready', timeout=SHORT_TIMEOUT)
+        manage_btn.wait("visible enabled ready", timeout=DEFAULT_TIMEOUT)
         manage_btn.click_input()
         log_step("Clicked Manage HP Account button.")
- 
+
         create_btn = main_win.child_window(**CREATE_ACCOUNT_BTN)
-        create_btn.wait('visible enabled ready', timeout=SHORT_TIMEOUT)
+        create_btn.wait("visible enabled ready", timeout=DEFAULT_TIMEOUT)
         create_btn.click_input()
         log_step("Clicked Create Account button.")
- 
-        return desktop
- 
+
+        return app
+
     except Exception as e:
         log_step(f"Error launching HP Smart: {e}", "FAIL")
         return None
@@ -102,19 +159,34 @@ def launch_hp_smart(timeout: int = DEFAULT_TIMEOUT):
 def fill_account_form(desktop, email: str, first_name: str, last_name: str, password: str = DEFAULT_PASSWORD):
     """Fill the account creation form in the HP account browser window."""
     try:
-        browser_win = desktop.window(title_re=HP_ACCOUNT_WINDOW_RE)
-        browser_win.wait('exists visible enabled ready', timeout=DEFAULT_TIMEOUT)
+        browser_win = Desktop(backend="uia").window(title_re=".*Chrome.*")
+        browser_win.wait("exists ready", timeout=20)
         browser_win.set_focus()
+
+        # browser_win = desktop.window(title_re=HP_ACCOUNT_WINDOW_RE)
+        # browser_win.wait('exists visible enabled ready', timeout=DEFAULT_TIMEOUT)
+        # browser_win.set_focus()
         log_step("Focused HP Account browser window.")
  
-        browser_win.child_window(**FIRSTNAME_FIELD).type_keys(first_name)
-        browser_win.child_window(**LASTNAME_FIELD).type_keys(last_name)
-        browser_win.child_window(**EMAIL_FIELD).type_keys(email)
-        browser_win.child_window(**PASSWORD_FIELD).type_keys(password)
+        first_name_field = browser_win.window(**FIRSTNAME_FIELD)
+        first_name_field.wait('visible enabled ready', timeout=DEFAULT_TIMEOUT).type_keys(first_name)
+        
+        last_name_field = browser_win.window(**LASTNAME_FIELD)
+        last_name_field.wait('visible enabled ready', timeout=DEFAULT_TIMEOUT).type_keys(last_name)
+        
+        email_field = browser_win.window(**EMAIL_FIELD)
+        email_field.wait('visible enabled ready', timeout=DEFAULT_TIMEOUT).type_keys(email)
+        
+        password_field = browser_win.window(**PASSWORD_FIELD)
+        password_field.wait('visible enabled ready', timeout=DEFAULT_TIMEOUT).type_keys(password)
+
+        
+        time.sleep(3)
+        send_keys('{PGDN}')
+        time.sleep(3)
  
         signup = browser_win.child_window(**SIGNUP_BUTTON)
-        signup.wait('visible enabled ready', timeout=SHORT_TIMEOUT)
-        signup.click_input()
+        signup.wait('visible enabled ready', timeout=DEFAULT_TIMEOUT).click_input()
         log_step("Filled account form and clicked Create button.")
  
         time.sleep(3)
@@ -139,7 +211,7 @@ def fetch_otp_from_mailsac(mailbox_local_part: str,
     driver = None
     try:
         driver = _create_selenium_driver()
-        wait = WebDriverWait(driver, SHORT_TIMEOUT)
+        wait = WebDriverWait(driver, DEFAULT_TIMEOUT)
  
         driver.get(mailsac_url)
         log_step("Opened Mailsac website.")
@@ -201,7 +273,7 @@ def complete_web_verification_in_app(otp: str, timeout: int = DEFAULT_TIMEOUT):
         log_step("Focused OTP input screen.")
  
         otp_box = otp_win.child_window(**OTP_INPUT)
-        otp_box.wait('visible enabled ready', timeout=SHORT_TIMEOUT)
+        otp_box.wait('visible enabled ready', timeout=DEFAULT_TIMEOUT)
  
         pyperclip.copy(otp)
         time.sleep(0.5)
@@ -210,12 +282,15 @@ def complete_web_verification_in_app(otp: str, timeout: int = DEFAULT_TIMEOUT):
         log_step("OTP pasted successfully.")
  
         submit_btn = otp_win.child_window(**OTP_SUBMIT_BUTTON)
-        submit_btn.wait('visible enabled ready', timeout=SHORT_TIMEOUT)
+        submit_btn.wait('visible enabled ready', timeout=DEFAULT_TIMEOUT)
         submit_btn.click_input()
         log_step("Clicked Verify button.")
        
         # ✅ FIXED: Wait for popup + auto-open (no pywinauto needed)
-        time.sleep(5)
+        time.sleep(15)
+        send_keys("{TAB}")
+        send_keys("{TAB}")
+        send_keys("{ENTER}")
         log_step("Waiting for HP Smart app to open automatically")
  
     except Exception as e:
@@ -224,17 +299,13 @@ def complete_web_verification_in_app(otp: str, timeout: int = DEFAULT_TIMEOUT):
 # ✅ FIXED: Simple keyboard fallback (100% reliable)
 def click_open_hp_smart(timeout: int = DEFAULT_TIMEOUT):
     """Handle Chrome popup using keyboard ENTER (works always)."""
-    log_step("Using keyboard ENTER for Chrome popup (reliable fallback)")
-   
-    for i in range(3):
-        try:
-            keyboard.send_keys("{ENTER}")
-            log_step(f"Sent ENTER key (attempt {i+1})")
-            time.sleep(1)
-        except:
-            pass
-   
-    log_step("Chrome popup handling completed", "PASS")
+    
+    browser_win = Desktop(backend="uia").window(title_re=".*Chrome.*")
+    browser_win.wait("exists ready", timeout=20)
+    browser_win.set_focus()
+    open_hp_field = browser_win.window(**OPEN_HP_SMART_BUTTON)
+    open_hp_field.wait('visible enabled ready', timeout=DEFAULT_TIMEOUT).click_input()
+    log_step("Clicked Open HP Smart button.")
     return True
  
 def generate_report(path: str = "automation_report.html") -> None:
@@ -266,7 +337,8 @@ def main():
         otp, driver = fetch_otp_from_mailsac(mailbox_local_part)
         if otp:
             complete_web_verification_in_app(otp)
- 
+            time.sleep(5)  # wait for popup to appear
+            # click_open_hp_smart()
         if driver:
             try:
                 alert = Alert(driver)
